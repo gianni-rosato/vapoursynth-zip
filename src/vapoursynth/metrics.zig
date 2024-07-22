@@ -2,6 +2,9 @@ const std = @import("std");
 const vszip = @import("../vszip.zig");
 const helper = @import("../helper.zig");
 const ssimulacra2 = @import("../filters/metric_ssimulacra2.zig");
+const xpsnr = @cImport({
+    @cInclude("../filters/metric_xpsnr.h");
+});
 
 const vs = vszip.vs;
 const vsh = vszip.vsh;
@@ -65,6 +68,62 @@ fn ssimulacra2GetFrame(n: c_int, activation_reason: vs.ActivationReason, instanc
     return null;
 }
 
+fn xpsnrGetFrame(n: c_int, activation_reason: vs.ActivationReason, instance_data: ?*anyopaque, frame_data: ?*?*anyopaque, frame_ctx: ?*vs.FrameContext, core: ?*vs.Core, vsapi: ?*const vs.API) callconv(.C) ?*const vs.Frame {
+    _ = frame_data;
+    const d: *Data = @ptrCast(@alignCast(instance_data));
+
+    if (activation_reason == .Initial) {
+        vsapi.?.requestFrameFilter.?(n, d.node1, frame_ctx);
+        vsapi.?.requestFrameFilter.?(n, d.node2, frame_ctx);
+    } else if (activation_reason == .AllFramesReady) {
+        const src1 = vsapi.?.getFrameFilter.?(n, d.node1, frame_ctx);
+        const src2 = vsapi.?.getFrameFilter.?(n, d.node2, frame_ctx);
+        defer vsapi.?.freeFrame.?(src1);
+        defer vsapi.?.freeFrame.?(src2);
+
+        const width: usize = @intCast(vsapi.?.getFrameWidth.?(src1, 0));
+        const height: usize = @intCast(vsapi.?.getFrameHeight.?(src1, 0));
+        const stride: usize = @intCast(vsapi.?.getStride.?(src1, 0));
+        const dst = vsapi.?.copyFrame.?(src2, core).?;
+
+        // const srcp1 = [3][*c]const u8{
+        //     vsapi.?.getReadPtr.?(src1, 0),
+        //     vsapi.?.getReadPtr.?(src1, 1),
+        //     vsapi.?.getReadPtr.?(src1, 2),
+        // };
+
+        // const srcp2 = [3][*c]const u8{
+        //     vsapi.?.getReadPtr.?(src2, 0),
+        //     vsapi.?.getReadPtr.?(src2, 1),
+        //     vsapi.?.getReadPtr.?(src2, 2),
+        // };
+
+        const srcp1_0: [*c]u8 = @constCast(vsapi.?.getReadPtr.?(src1, 0));
+        const srcp1_1: [*c]u8 = @constCast(vsapi.?.getReadPtr.?(src1, 1));
+        const srcp1_2: [*c]u8 = @constCast(vsapi.?.getReadPtr.?(src1, 2));
+
+        const srcp2_0: [*c]u8 = @constCast(vsapi.?.getReadPtr.?(src1, 0));
+        const srcp2_1: [*c]u8 = @constCast(vsapi.?.getReadPtr.?(src1, 1));
+        const srcp2_2: [*c]u8 = @constCast(vsapi.?.getReadPtr.?(src1, 2));
+
+        const val = xpsnr.process(
+            @intCast(width),
+            @intCast(height),
+            @intCast(stride),
+            @ptrCast(@alignCast(srcp1_0)),
+            @ptrCast(@alignCast(srcp1_1)),
+            @ptrCast(@alignCast(srcp1_2)),
+            @ptrCast(@alignCast(srcp2_0)),
+            @ptrCast(@alignCast(srcp2_1)),
+            @ptrCast(@alignCast(srcp2_2)),
+        );
+
+        _ = vsapi.?.mapSetFloat.?(vsapi.?.getFramePropertiesRW.?(dst), "_XPSNR", val, .Replace);
+        return dst;
+    }
+    return null;
+}
+
 export fn MetricsFree(instance_data: ?*anyopaque, core: ?*vs.Core, vsapi: ?*const vs.API) callconv(.C) void {
     _ = core;
     const d: *Data = @ptrCast(@alignCast(instance_data));
@@ -86,12 +145,12 @@ pub export fn MetricsCreate(in: ?*const vs.Map, out: ?*vs.Map, user_data: ?*anyo
     _ = dt; // autofix
 
     const mode = map.getInt(i32, "mode") orelse 0;
-    if (mode != 0) {
-        vsapi.?.mapSetError.?(out, filter_name ++ " : only mode=0 is implemented.");
-        vsapi.?.freeNode.?(d.node1);
-        vsapi.?.freeNode.?(d.node2);
-        return;
-    }
+    // if (mode != 0) {
+    //     vsapi.?.mapSetError.?(out, filter_name ++ " : only mode=0 is implemented.");
+    //     vsapi.?.freeNode.?(d.node1);
+    //     vsapi.?.freeNode.?(d.node2);
+    //     return;
+    // }
 
     if ((vi1.format.colorFamily == .YUV)) {
         d.node1 = helper.YUVtoRGBS(d.node1, core, vsapi);
@@ -116,7 +175,11 @@ pub export fn MetricsCreate(in: ?*const vs.Map, out: ?*vs.Map, user_data: ?*anyo
         },
     };
 
-    vsapi.?.createVideoFilter.?(out, filter_name, vi_out, ssimulacra2GetFrame, MetricsFree, .Parallel, &deps, deps.len, data, core);
+    if (mode == 0) {
+        vsapi.?.createVideoFilter.?(out, filter_name, vi_out, ssimulacra2GetFrame, MetricsFree, .Parallel, &deps, deps.len, data, core);
+    } else if (mode == 1) {
+        vsapi.?.createVideoFilter.?(out, filter_name, vi_out, xpsnrGetFrame, MetricsFree, .Parallel, &deps, deps.len, data, core);
+    }
 }
 
 pub fn sRGBtoLinearRGB(node: ?*vs.Node, core: ?*vs.Core, vsapi: ?*const vs.API) ?*vs.Node {

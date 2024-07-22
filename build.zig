@@ -17,6 +17,17 @@ pub fn build(b: *std.Build) void {
     });
 
     lib.root_module.addImport("vapoursynth", vapoursynth_dep.module("vapoursynth"));
+    lib.addIncludePath(b.path("src/filters"));
+    lib.addCSourceFiles(.{
+        .files = &.{
+            "src/filters/metric_xpsnr.c",
+        },
+        .flags = &.{
+            "-std=c99",
+            "-lm",
+            "-O3",
+        },
+    });
     lib.linkLibC();
 
     if (lib.root_module.optimize == .ReleaseFast) {
